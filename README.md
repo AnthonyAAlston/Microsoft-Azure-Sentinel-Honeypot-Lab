@@ -95,7 +95,3 @@ The supplied workbook view shows its largest displayed count in the Philippines,
 
 ![Classroom workbook map of geolocated failed sign-in events](https://github.com/user-attachments/assets/2b61c431-9a0b-43dd-bb7b-cbe59cd8985b)
 
-
-## 9. Clean up Azure resources
-
-After collecting the required evidence, remove dedicated resources that are no longer needed and review workspace retention and service costs.
