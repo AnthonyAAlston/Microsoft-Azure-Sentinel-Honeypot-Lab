@@ -99,7 +99,3 @@ The supplied workbook view shows its largest displayed count in the Philippines,
 ## 9. Clean up Azure resources
 
 After collecting the required evidence, remove dedicated resources that are no longer needed and review workspace retention and service costs.
-
-## Reference
-
-[Microsoft Azure Sentinel Honeypot Lab](https://github.com/nuttercd/microsoft-azure-sentinel-honeypot-lab) documents the reference workflow. The results described here are from the supplied classroom walkthrough.
