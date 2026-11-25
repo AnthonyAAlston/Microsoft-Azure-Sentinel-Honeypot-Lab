@@ -1,86 +1,89 @@
 # Microsoft Azure Sentinel Honeypot Lab
 
-A defensive Azure lab for investigating failed Windows Remote Desktop (RDP) sign-ins. It collects Windows Security events in Log Analytics, uses Kusto Query Language (KQL) to summarize repeated failures, and visualizes approximate source locations in a Microsoft Sentinel workbook.
+This walkthrough follows a Windows RDP honeypot from Azure provisioning through failed sign-in collection, IP geolocation, and a Microsoft Sentinel workbook map. The figures and observations document the classroom walkthrough.
 
-```mermaid
-flowchart LR
-    VM["Isolated Windows VM"] --> AMA["Azure Monitor Agent"]
-    AMA --> LA["Log Analytics · SecurityEvent"]
-    LA --> KQL["KQL · Event 4625"]
-    KQL --> WB["Sentinel workbook"]
-```
+## 1. Create the Windows VM
 
-## 1. Set up the lab network
+The walkthrough uses `honeypot-vm` in the `honeypot-vm_group` resource group in East US. The Azure portal screenshot shows a Windows 10 Pro image selected during setup.
 
-Create a dedicated Azure resource group, virtual network, and supported Windows VM. Use a private VM with management access through Azure Bastion or a private lab network. Keep Windows Defender Firewall enabled and scope RDP access to the approved management path. Run the lab without production data or shared credentials.
+<!-- Figure pending upload: ![Windows VM configuration in Azure](./createvm.png) -->
 
-## 2. Connect Windows Security events to Sentinel
+## 2. Review network exposure and reachability
 
-1. Create a Log Analytics workspace for the lab and onboard it to Microsoft Sentinel.
-2. Enable the **Windows Security Events via AMA** connector and create a data collection rule (DCR) targeting the Windows VM. Select the **Minimal** event set or use a custom rule that includes event 4625.
-3. On the VM, verify that failed logons are audited. From an authorized lab client, make one intentional failed RDP sign-in and look for Event ID **4625** in the local Security log.
-4. In Log Analytics, verify that the event arrives in `SecurityEvent`. For a private lab client, the event can validate ingestion while the synthetic query below validates the map. Review Defender for Cloud separately if you want posture management for the lab.
+The historical walkthrough shows a permissive Azure network security group and a change to Windows Defender Firewall, followed by an ICMP reachability check. Use an isolated VM for reproduction, keep the firewall enabled, and restrict access to an approved lab client or private management path. Ping verifies ICMP reachability. An authorized failed RDP sign-in can provide a test Windows Security event.
 
-[Windows security event sets](https://learn.microsoft.com/azure/sentinel/windows-security-event-id-reference) · [Windows event 4625](https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4625)
+<!-- Figure pending upload: ![Historical Azure inbound rule screen](./NICSecurityGroup.png) -->
+<!-- Figure pending upload: ![Windows Defender Firewall properties in the historical walkthrough](./wfmsc.png) -->
+<!-- Figure pending upload: ![ICMP reachability test with the destination redacted](./ping.png) -->
 
-## 3. Investigate repeated failed RDP sign-ins
+## 3. Set up Log Analytics and Microsoft Defender for Cloud
+
+The walkthrough creates the `law-honeypot` Log Analytics workspace in the same resource group and region as the VM. It then opens Defender for Cloud environment settings and reviews the workspace plans. The screenshots show Foundational CSPM and Servers enabled and SQL servers on machines disabled.
+
+<!-- Figure pending upload: ![Log Analytics workspace configuration](./law.png) -->
+<!-- Figure pending upload: ![Defender for Cloud environment settings](./clouddefender.png) -->
+<!-- Figure pending upload: ![Defender plans shown for the lab workspace](./turnonclouddefender.png) -->
+
+## 4. Connect the VM and add Microsoft Sentinel
+
+The VM connection screenshot shows the older workspace connection page before onboarding. The Sentinel screenshot shows `law-honeypot` selected as the workspace. For a new deployment, use Azure Monitor Agent and an associated data collection rule (DCR).
+
+<!-- Figure pending upload: ![Historical workspace VM connection screen before onboarding](./connectlawvm.png) -->
+<!-- Figure pending upload: ![Log Analytics workspace selected for Microsoft Sentinel](./sentineladd.png) -->
+
+## 5. Export failed logons and enrich source IPs
+
+The PowerShell exporter reads failed Windows Security logon events, extracts fields such as the destination host and source IP, looks up approximate IP geolocation, and writes enriched records to `C:\ProgramData\failed_rdp.log`. Event ID 4625 identifies a failed logon. Use the event's logon type and context when evaluating whether it was an RDP failure.
+
+The historical exporter uses an external geolocation API. Store any credential outside source control and use it only when sending eligible source IPs to the provider is authorized.
+
+<!-- Figure pending upload: ![PowerShell exporter field extraction and enrichment](./logexporterscript.png) -->
+<!-- Figure pending upload: ![Example geolocation response from the IP lookup provider](./geolocation.png) -->
+<!-- Figure pending upload: ![Exporter configuration with the credential redacted](./apikey.png) -->
+
+## 6. Ingest the custom log
+
+The walkthrough opens **Tables** in the workspace and shows the DCR-based custom log option. The final configuration screenshot shows a historical custom text-log wizard and identifies the file, newline delimiter, and destination table `FAILED_RDP_WITH_GEO_CD_CL`. For a new implementation, configure Azure Monitor Agent custom text-log collection for the equivalent file and associate the DCR with the VM. Use a destination schema that includes a string column named `RawData` for the queries below.
+
+<!-- Figure pending upload: ![DCR-based custom log option in Log Analytics](./customlogdcr.png) -->
+<!-- Figure pending upload: ![Historical custom log file, delimiter, path, and table name](./failedrdpwithgeo.png) -->
+
+## 7. Verify the ingested rows
 
 ```kusto
-SecurityEvent
-| where TimeGenerated > ago(24h)
-| where EventID == 4625 and LogonType == 10
-| where isnotempty(IpAddress) and IpAddress != "-"
-| summarize Attempts = count(),
-            Accounts = dcount(TargetUserName),
-            FirstSeen = min(TimeGenerated),
-            LastSeen = max(TimeGenerated)
-    by SourceIP = IpAddress, Computer
+FAILED_RDP_WITH_GEO_CD_CL
+| take 15
+```
+
+Confirm that the returned rows have timestamps and that `RawData` contains the expected enriched fields. The classroom screenshot shows 1,135 results for its selected time range.
+
+<!-- Figure pending upload: ![Log Analytics custom table results with Azure identifiers redacted](./queryresults.png) -->
+
+## 8. Build the failed RDP map
+
+Add a query to a Sentinel workbook for the lab workspace. Use the workbook time picker, choose a map visualization, and bind the latitude and longitude fields. Use `Attempts` to size markers and `Country` to label them.
+
+```kusto
+FAILED_RDP_WITH_GEO_CD_CL
+| extend Latitude = todouble(extract(@"(?:^|,)latitude:([^,]+)", 1, RawData)),
+         Longitude = todouble(extract(@"(?:^|,)longitude:([^,]+)", 1, RawData)),
+         Country = extract(@"(?:^|,)country:([^,]+)", 1, RawData),
+         Destination = extract(@"(?:^|,)destinationhost:([^,]+)", 1, RawData),
+         SourceIP = extract(@"(?:^|,)sourcehost:([^,]+)", 1, RawData)
+| where isnotempty(SourceIP) and Destination !~ "samplehost"
+| where Latitude between (-90.0 .. 90.0) and Longitude between (-180.0 .. 180.0)
+| summarize Attempts = count() by Latitude, Longitude, Country
 | order by Attempts desc
 ```
 
-Logon type 10 is RemoteInteractive. Some failed authentication attempts can appear with other logon types, so if the test event is absent, check event 4625 without the logon-type filter and compare it with the VM event log. For triage, review affected accounts, first and last timestamps, and nearby successful sign-ins before drawing conclusions.
+The supplied workbook view shows its largest displayed count in the Philippines, followed by Germany. Those counts describe the captured classroom view. IP geolocation estimates the location associated with the source IP, which may belong to a proxy, VPN, or hosting provider.
 
-## 4. Map source regions in a workbook
+<!-- Figure pending upload: ![Classroom workbook map of geolocated failed sign-in events](./map.png) -->
 
-Add a query to a Sentinel workbook, select the lab workspace, and paste the following KQL. Choose **Map**, select **Latitude/Longitude**, and assign `Latitude`, `Longitude`, and `Attempts` to the coordinate and size fields. Use `Country` as the label.
+## 9. Clean up Azure resources
 
-```kusto
-SecurityEvent
-| where TimeGenerated > ago(24h)
-| where EventID == 4625 and LogonType == 10
-| where isnotempty(IpAddress) and IpAddress != "-"
-| summarize Attempts = count() by SourceIP = IpAddress
-| extend Location = geo_info_from_ip_address(SourceIP)
-| extend Latitude = todouble(Location.latitude),
-         Longitude = todouble(Location.longitude),
-         Country = tostring(Location.country)
-| where isnotnull(Latitude) and isnotnull(Longitude)
-| summarize Attempts = sum(Attempts) by Latitude, Longitude, Country
-| order by Attempts desc
-```
-
-IP geolocation is approximate. VPNs, proxies, shared IPs, and hosting providers can affect the apparent location. The query excludes events without usable coordinates from the map.
-
-### Synthetic workbook preview
-
-Use this dataset to check map rendering even if the private lab VM has no geolocatable source IPs. The counts and coordinates below are illustrative.
-
-```kusto
-datatable(Latitude:real, Longitude:real, Country:string, Attempts:long)
-[
-    14.60, 120.98, "Philippines", 80,
-    52.52, 13.41, "Germany", 34,
-    51.51, -0.13, "United Kingdom", 16,
-    41.88, -87.63, "United States", 12
-]
-```
-
-## 5. Verify and clean up
-
-- Compare the local event timestamp and destination host with the matching record in Log Analytics.
-- Check where the map places the four synthetic points and verify that marker size tracks `Attempts`.
-- When finished, remove dedicated lab resources you no longer need and review any workspace retention or service charges.
+After collecting the required evidence, remove dedicated resources that are no longer needed and review workspace retention and service costs.
 
 ## Reference
 
-[Microsoft Azure Sentinel Honeypot Lab](https://github.com/nuttercd/microsoft-azure-sentinel-honeypot-lab) served as a reference for the lab workflow. This write-up uses Azure Monitor Agent and original KQL. The sample workbook data is synthetic, and this repository does not report results from a live deployment.
+[Microsoft Azure Sentinel Honeypot Lab](https://github.com/nuttercd/microsoft-azure-sentinel-honeypot-lab) documents the reference workflow. The results described here are from the supplied classroom walkthrough.
